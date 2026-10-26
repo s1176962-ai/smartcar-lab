@@ -1,0 +1,28 @@
+export type Expr = number | boolean | {op:string; a?:Expr; b?:Expr; name?:string};
+export type Command = {type:string; value?:Expr; name?:string; condition?:Expr; body?:Command[]; otherwise?:Command[]};
+export interface Rect {x:number;y:number;w:number;h:number}
+export interface World {start:{x:number;y:number;heading:number};goal:{x:number;y:number};obstacles:Rect[]}
+export interface RobotState {x:number;y:number;heading:number;speed:number;sensorRange:number;collision:boolean;distance:number;trail:{x:number;y:number}[]}
+export interface RobotAdapter {state:RobotState; reset(world:World):void; move(distance:number):void; turn(degrees:number):void; sense(angleOffset?:number):number; atGoal():boolean}
+export class VirtualRobotAdapter implements RobotAdapter {
+ state!:RobotState;
+ constructor(public world:World){this.reset(world)}
+ reset(world:World){this.world=world;this.state={...world.start,speed:100,sensorRange:180,collision:false,distance:0,trail:[{...world.start}]}}
+ blocked(x:number,y:number){return x<14||x>586||y<14||y>426||this.world.obstacles.some(o=>x>o.x-13&&x<o.x+o.w+13&&y>o.y-13&&y<o.y+o.h+13)}
+ move(distance:number){if(!Number.isFinite(distance))throw Error('Movement must be a finite number.');const s=this.state;const steps=Math.ceil(Math.abs(distance));for(let i=0;i<steps;i++){const d=Math.sign(distance)*Math.min(1,Math.abs(distance)-i);const x=s.x+Math.cos(s.heading*Math.PI/180)*d,y=s.y+Math.sin(s.heading*Math.PI/180)*d;if(this.blocked(x,y)){s.collision=true;throw Error('Collision detected. Check your distance sensor and turning angle.')}s.x=x;s.y=y;s.distance+=Math.abs(d)}if(distance!==0)s.trail.push({x:s.x,y:s.y})}
+ turn(degrees:number){if(!Number.isFinite(degrees))throw Error('Angle must be finite.');this.state.heading=((this.state.heading+degrees)%360+360)%360}
+ sense(angleOffset=0){const s=this.state;const angle=s.heading+angleOffset;for(let d=0;d<s.sensorRange;d+=2){if(this.blocked(s.x+Math.cos(angle*Math.PI/180)*d,s.y+Math.sin(angle*Math.PI/180)*d))return d}return s.sensorRange}
+ atGoal(){return Math.hypot(this.state.x-this.world.goal.x,this.state.y-this.world.goal.y)<25}
+}
+// Each future physical adapter must implement its own protocol, units and capabilities.
+export interface PhysicalRobotAdapter extends RobotAdapter {connect():Promise<void>;disconnect():Promise<void>;emergencyStop():Promise<void>}
+export type Action={type:'move'|'turn'|'wait'|'speed'|'drive'|'brake'|'halt';value:number};
+export class Interpreter {
+ steps=0;stopped=false;variables:Record<string,number>={};
+ constructor(public robot:RobotAdapter,public maxSteps=10000){}
+ stop(){this.stopped=true}
+ tick(){if(this.stopped)throw Error('Program stopped.');if(++this.steps>this.maxSteps)throw Error('Execution limit reached. Check your loops.')}
+ expression(e:Expr|undefined):number|boolean {if(typeof e==='number'){if(!Number.isFinite(e))throw Error('Enter a finite number.');return e}if(typeof e==='boolean')return e;if(!e)throw Error('Connect a value or condition block.');if(e.op==='sensor_right')return this.robot.sense(90);if(e.op==='sensor_left')return this.robot.sense(-90);if(e.op==='goal')return this.robot.atGoal();if(e.op==='sensor')return this.robot.sense();if(e.op==='obstacle')return this.robot.sense()<60;if(e.op==='variable')return this.variables[e.name!]??0;const a=this.expression(e.a);if(e.op==='not')return !a;const b=this.expression(e.b);switch(e.op){case 'LT':return Number(a)<Number(b);case 'GT':return Number(a)>Number(b);case 'LTE':return Number(a)<=Number(b);case 'GTE':return Number(a)>=Number(b);case 'EQ':return a===b;case 'NEQ':return a!==b;case 'AND':return !!a&&!!b;case 'OR':return !!a||!!b;case 'ADD':return Number(a)+Number(b);case 'MINUS':return Number(a)-Number(b);case 'MULTIPLY':return Number(a)*Number(b);case 'POWER':{const v=Number(a)**Number(b);if(!Number.isFinite(v))throw Error('Arithmetic result is too large.');return v;}case 'DIVIDE':if(Number(b)===0)throw Error('Cannot divide by zero.');return Number(a)/Number(b);default:throw Error('Unsupported expression: '+e.op)}}
+ *run(commands:Command[]):Generator<Action>{for(const c of commands){this.tick();switch(c.type){case 'drive':case 'brake':case 'halt':yield {type:c.type,value:0};break;case 'forever':{for(let i=0;i<1000;i++){this.tick();yield* this.run(c.body??[]);yield {type:'wait',value:0}}throw Error('Loop limit reached. Check your condition.')}case 'move':case 'turn':case 'wait':case 'speed':{const v=Number(this.expression(c.value));if(!Number.isFinite(v)||Math.abs(v)>10000||(c.type==='wait'&&(v<0||v>30))||(c.type==='speed'&&(v<10||v>300)))throw Error('Value out of range. Speed: 10–300; wait: 0–30 seconds; distance/angle: ±10000.');yield {type:c.type,value:v};break}case 'repeat':{const n=Number(this.expression(c.value));if(!Number.isInteger(n)||n<0||n>1000)throw Error('Repeat count must be an integer from 0 to 1000.');for(let i=0;i<n;i++){this.tick();yield* this.run(c.body??[])}break}case 'until':{let i=0;while(!this.expression(c.condition)){this.tick();if(++i>1000)throw Error('Loop limit reached. Check your condition.');yield* this.run(c.body??[])}break}case 'if':yield* this.run(this.expression(c.condition)?c.body??[]:c.otherwise??[]);break;case 'set':this.variables[c.name!]=Number(this.expression(c.value));break;default:throw Error('Unsupported command: '+c.type)}}}
+}
+export function concepts(program:Command[]):Set<string>{const found=new Set<string>();function expr(e:Expr|undefined){if(e&&typeof e==='object'){if(e.op.startsWith('sensor')||e.op==='obstacle')found.add('sensor');expr(e.a);expr(e.b)}}function visit(cs:Command[]){for(const c of cs){found.add(c.type);expr(c.condition);expr(c.value);visit(c.body??[]);visit(c.otherwise??[])}}visit(program);return found}

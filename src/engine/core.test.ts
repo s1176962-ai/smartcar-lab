@@ -1,0 +1,25 @@
+import {describe,it,expect} from 'vitest';
+import {Interpreter,VirtualRobotAdapter,type Command,type World} from './core';
+import {assess,isSquare} from './assessment';
+import {lessons} from '../lessons/data';
+const world:World={start:{x:100,y:100,heading:0},goal:{x:200,y:100},obstacles:[]};
+function execute(commands:Command[],robot=new VirtualRobotAdapter(world)){const engine=new Interpreter(robot);for(const a of engine.run(commands)){if(a.type==='move')robot.move(a.value);if(a.type==='turn')robot.turn(a.value);if(a.type==='speed')robot.state.speed=a.value}return robot}
+describe('Robot simulation and safe interpreter',()=>{
+it('moves forward and backward in heading direction',()=>{const r=execute([{type:'move',value:80},{type:'move',value:-30}]);expect(r.state.x).toBeCloseTo(150);expect(r.state.y).toBe(100);expect(r.state.distance).toBe(110)});
+it('rotates clockwise with consistent coordinates',()=>{const r=execute([{type:'turn',value:90},{type:'move',value:50}]);expect(r.state.y).toBeCloseTo(150);expect(r.state.x).toBeCloseTo(100)});
+it('executes nested loops',()=>{const r=execute([{type:'repeat',value:2,body:[{type:'repeat',value:3,body:[{type:'move',value:10}]}]}]);expect(r.state.x).toBeCloseTo(160)});
+it('selects conditional branches using live sensors',()=>{const r=new VirtualRobotAdapter({...world,obstacles:[{x:180,y:70,w:30,h:60}]});execute([{type:'if',condition:{op:'LT',a:{op:'sensor'},b:100},body:[{type:'turn',value:90}],otherwise:[{type:'move',value:100}]}],r);expect(r.state.heading).toBe(90);expect(r.state.x).toBe(100)});
+it('stops at an obstacle without tunneling',()=>{const r=new VirtualRobotAdapter({...world,obstacles:[{x:180,y:70,w:30,h:60}]});expect(()=>r.move(200)).toThrow('Collision');expect(r.state.x).toBeLessThan(180);expect(r.state.collision).toBe(true)});
+it('detects boundary collisions',()=>{const r=new VirtualRobotAdapter(world);expect(()=>r.move(-100)).toThrow('Collision')});
+it('detects goals geometrically',()=>{const r=execute([{type:'move',value:100}]);expect(r.atGoal()).toBe(true)});
+it('interrupts a running generator',()=>{const engine=new Interpreter(new VirtualRobotAdapter(world));const g=engine.run([{type:'repeat',value:100,body:[{type:'move',value:1}]}]);g.next();engine.stop();expect(()=>g.next()).toThrow('stopped')});
+it('rejects invalid commands and values',()=>{expect(()=>execute([{type:'mystery'}])).toThrow('Unsupported');expect(()=>execute([{type:'move',value:NaN}])).toThrow('finite');expect(()=>execute([{type:'repeat',value:-1}])).toThrow('Repeat count');expect(()=>execute([{type:'speed',value:0}])).toThrow('range')});
+it('bounds infinite loops, including empty loops',()=>{expect(()=>execute([{type:'until',condition:false,body:[]}])).toThrow('Loop limit')});
+it('enforces the execution step budget',()=>{const e=new Interpreter(new VirtualRobotAdapter(world),3);expect(()=>[...e.run([{type:'repeat',value:20,body:[{type:'wait',value:0}]}])]).toThrow('Execution limit')});
+it('evaluates variables, arithmetic and until conditions',()=>{const r=execute([{type:'set',name:'n',value:0},{type:'until',condition:{op:'GTE',a:{op:'variable',name:'n'},b:3},body:[{type:'move',value:10},{type:'set',name:'n',value:{op:'ADD',a:{op:'variable',name:'n'},b:1}}]}]);expect(r.state.x).toBeCloseTo(130)});
+it('resets all robot state',()=>{const r=execute([{type:'move',value:30},{type:'turn',value:45}]);r.reset(world);expect(r.state.heading).toBe(0);expect(r.state.distance).toBe(0);expect(r.state.trail).toHaveLength(1)});
+it('recognizes a square and rejects a rectangle',()=>{const r=execute(lessons[1].starter,new VirtualRobotAdapter(lessons[1].world));expect(isSquare(r.state.trail)).toBe(true);expect(assess(lessons[1],r,lessons[1].starter).success).toBe(true);expect(isSquare([{x:0,y:0},{x:100,y:0},{x:100,y:200},{x:0,y:200},{x:0,y:0}])).toBe(false)});
+it('separates route success from required concepts',()=>{const r=execute([{type:'repeat',value:4,body:[{type:'move',value:100},{type:'turn',value:90}]}],new VirtualRobotAdapter(lessons[1].world));const a=assess(lessons[1],r,[{type:'move',value:100}]);expect(a.route).toBe(true);expect(a.success).toBe(false);expect(a.missing).toContain('repeat')});
+it('has a valid collision-free route for obstacle avoidance',()=>{const p:Command[]=[{type:'if',condition:{op:'LT',a:{op:'sensor'},b:160},body:[{type:'turn',value:-90},{type:'move',value:120},{type:'turn',value:90}]},{type:'move',value:320},{type:'turn',value:90},{type:'move',value:120}];const r=execute(p,new VirtualRobotAdapter(lessons[2].world));expect(assess(lessons[2],r,p).success).toBe(true)});
+it('has a valid autonomous route combining required concepts',()=>{const p:Command[]=[{type:'repeat',value:1,body:[{type:'if',condition:{op:'LT',a:{op:'sensor'},b:130},body:[{type:'turn',value:-90},{type:'move',value:120},{type:'turn',value:90}]}]},{type:'move',value:200},{type:'turn',value:90},{type:'move',value:220},{type:'turn',value:-90},{type:'move',value:200},{type:'turn',value:-90},{type:'move',value:100}];const r=execute(p,new VirtualRobotAdapter(lessons[3].world));expect(assess(lessons[3],r,p).success).toBe(true)});
+});
